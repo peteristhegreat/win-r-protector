@@ -4,8 +4,11 @@ package tray
 
 import (
 	"fmt"
+	"syscall"
+	"unsafe"
 
 	"github.com/lxn/walk"
+	"github.com/lxn/win"
 	"github.com/phyatt/win-r-protector/internal/applog"
 	"github.com/phyatt/win-r-protector/internal/appmeta"
 	"github.com/phyatt/win-r-protector/internal/elevate"
@@ -16,13 +19,14 @@ import (
 )
 
 type ui struct {
-	window    *walk.MainWindow
-	icon      *walk.NotifyIcon
-	status    *walk.Action
-	start     *walk.Action
-	stop      *walk.Action
-	restart   *walk.Action
-	uninstall *walk.Action
+	window        *walk.MainWindow
+	icon          *walk.NotifyIcon
+	attemptDialog *walk.Dialog
+	status        *walk.Action
+	start         *walk.Action
+	stop          *walk.Action
+	restart       *walk.Action
+	uninstall     *walk.Action
 
 	lastStatusError string
 }
@@ -54,6 +58,7 @@ func Run(initialWarning string) error {
 	}
 
 	view := &ui{window: window, icon: notifyIcon}
+	defer view.disposeAttemptDialog()
 	if err := view.buildMenu(); err != nil {
 		return err
 	}
@@ -78,7 +83,7 @@ func Run(initialWarning string) error {
 		}()
 		stopWatching := make(chan struct{})
 		defer close(stopWatching)
-		go showWinRAttempts(window, hook.Attempts(), stopWatching)
+		go showWinRAttempts(view, trayIcon, hook.Attempts(), stopWatching)
 	}
 
 	if initialWarning != "" {
@@ -145,17 +150,153 @@ func (view *ui) buildMenu() error {
 	return root.Add(manage)
 }
 
-func showWinRAttempts(window *walk.MainWindow, attempts <-chan struct{}, stop <-chan struct{}) {
+func showWinRAttempts(view *ui, icon *walk.Icon, attempts <-chan struct{}, stop <-chan struct{}) {
 	for {
 		select {
 		case <-attempts:
-			window.Synchronize(func() {
-				walk.MsgBox(window, appmeta.Name, "Win-R attempt detected", walk.MsgBoxOK|walk.MsgBoxIconWarning)
+			view.window.Synchronize(func() {
+				if err := view.showWinRAttemptDialog(icon); err != nil {
+					applog.Errorf("show Win+R attempt dialog: %v", err)
+				}
 			})
 		case <-stop:
 			return
 		}
 	}
+}
+
+func (view *ui) showWinRAttemptDialog(icon *walk.Icon) error {
+	if dialog := view.attemptDialog; dialog != nil && !dialog.IsDisposed() {
+		dialog.Show()
+		return positionDialogTopLeft(dialog)
+	}
+
+	// Keep the warning independent from the hidden tray owner and its message
+	// loop. Closing this modeless tool window must not close the tray process.
+	dialog, err := walk.NewDialogWithFixedSize(nil)
+	if err != nil {
+		return err
+	}
+	succeeded := false
+	defer func() {
+		if !succeeded {
+			dialog.Dispose()
+		}
+	}()
+
+	if err := dialog.SetTitle(appmeta.Name); err != nil {
+		return err
+	}
+	if err := dialog.SetIcon(icon); err != nil {
+		return err
+	}
+	if err := setToolWindowStyle(dialog); err != nil {
+		return err
+	}
+	dialogSize := walk.Size{Width: 340, Height: 130}
+	if err := dialog.SetMinMaxSize(dialogSize, dialogSize); err != nil {
+		return err
+	}
+
+	layout := walk.NewVBoxLayout()
+	if err := layout.SetMargins(walk.Margins{HNear: 20, VNear: 20, HFar: 20, VFar: 20}); err != nil {
+		return err
+	}
+	if err := layout.SetSpacing(14); err != nil {
+		return err
+	}
+	if err := layout.SetAlignment(walk.AlignHCenterVCenter); err != nil {
+		return err
+	}
+	if err := dialog.SetLayout(layout); err != nil {
+		return err
+	}
+
+	message, err := walk.NewLabel(dialog)
+	if err != nil {
+		return err
+	}
+	if err := message.SetText("Win-R attempt detected"); err != nil {
+		return err
+	}
+
+	ok, err := walk.NewPushButton(dialog)
+	if err != nil {
+		return err
+	}
+	if err := ok.SetText("OK"); err != nil {
+		return err
+	}
+	buttonSize := walk.Size{Width: 80, Height: 28}
+	if err := ok.SetMinMaxSize(buttonSize, buttonSize); err != nil {
+		return err
+	}
+	ok.Clicked().Attach(dialog.Accept)
+	if err := dialog.SetDefaultButton(ok); err != nil {
+		return err
+	}
+	if err := dialog.SetCancelButton(ok); err != nil {
+		return err
+	}
+
+	dialog.Disposing().Attach(func() {
+		if view.attemptDialog == dialog {
+			view.attemptDialog = nil
+		}
+	})
+	view.attemptDialog = dialog
+	dialog.Show()
+	if err := positionDialogTopLeft(dialog); err != nil {
+		return err
+	}
+	succeeded = true
+	return nil
+}
+
+func (view *ui) disposeAttemptDialog() {
+	if view.attemptDialog != nil && !view.attemptDialog.IsDisposed() {
+		view.attemptDialog.Dispose()
+	}
+	view.attemptDialog = nil
+}
+
+func setToolWindowStyle(dialog *walk.Dialog) error {
+	hwnd := dialog.Handle()
+	existing := uint32(win.GetWindowLong(hwnd, win.GWL_EXSTYLE))
+	desired := (existing | win.WS_EX_TOOLWINDOW) &^ win.WS_EX_APPWINDOW
+	if desired == existing {
+		return nil
+	}
+
+	win.SetLastError(0)
+	if previous := win.SetWindowLong(hwnd, win.GWL_EXSTYLE, int32(desired)); previous == 0 {
+		if lastErr := syscall.Errno(win.GetLastError()); lastErr != 0 {
+			return fmt.Errorf("set tool window style: %w", lastErr)
+		}
+	}
+	if !win.SetWindowPos(hwnd, 0, 0, 0, 0, 0, win.SWP_FRAMECHANGED|win.SWP_NOMOVE|win.SWP_NOSIZE|win.SWP_NOZORDER) {
+		return fmt.Errorf("apply tool window style: %w", syscall.Errno(win.GetLastError()))
+	}
+	return nil
+}
+
+func positionDialogTopLeft(dialog *walk.Dialog) error {
+	var monitorInfo win.MONITORINFO
+	monitorInfo.CbSize = uint32(unsafe.Sizeof(monitorInfo))
+	monitor := win.MonitorFromWindow(dialog.Handle(), win.MONITOR_DEFAULTTOPRIMARY)
+	if monitor == 0 || !win.GetMonitorInfo(monitor, &monitorInfo) {
+		return fmt.Errorf("get primary monitor work area")
+	}
+
+	bounds := dialog.BoundsPixels()
+	inset := dialog.IntFrom96DPI(16)
+	bounds.X = int(monitorInfo.RcWork.Left) + inset
+	bounds.Y = int(monitorInfo.RcWork.Top) + inset
+	if err := dialog.SetBoundsPixels(bounds); err != nil {
+		return err
+	}
+	win.SetForegroundWindow(dialog.Handle())
+	return nil
 }
 
 func appendWarning(existing, warning string) string {

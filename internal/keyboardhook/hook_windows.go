@@ -11,6 +11,7 @@ import (
 	"sync"
 	"unsafe"
 
+	"github.com/lxn/win"
 	"golang.org/x/sys/windows"
 )
 
@@ -27,6 +28,9 @@ const (
 	vkR    = 0x52
 	vkLWin = 0x5B
 	vkRWin = 0x5C
+	// 0xE8 is unassigned. Sending it while a Windows key is held prevents
+	// the shell from treating that Windows-key press as a standalone tap.
+	vkWinMask = 0xE8
 
 	pmNoRemove = 0x0000
 )
@@ -81,17 +85,21 @@ type Hook struct {
 	handle   windows.Handle
 	callback uintptr
 
-	leftWinDown  bool
-	rightWinDown bool
-	blockingR    bool
+	leftWinDown    bool
+	rightWinDown   bool
+	leftWinMasked  bool
+	rightWinMasked bool
+	blockingR      bool
+	maskWinPress   func() bool
 }
 
 // Start installs a global low-level keyboard hook on a dedicated OS thread.
 // It does not return until hook installation has succeeded or failed.
 func Start() (*Hook, error) {
 	hook := &Hook{
-		attempts: make(chan struct{}, 1),
-		finished: make(chan error, 1),
+		attempts:     make(chan struct{}, 1),
+		finished:     make(chan error, 1),
+		maskWinPress: sendWindowsKeyMask,
 	}
 	ready := make(chan error, 1)
 	go hook.run(ready)
@@ -197,20 +205,29 @@ func (hook *Hook) processKey(vkCode, event uint32) bool {
 	switch vkCode {
 	case vkLWin:
 		if keyDown {
+			if !hook.leftWinDown {
+				hook.leftWinMasked = false
+			}
 			hook.leftWinDown = true
 		} else if keyUp {
 			hook.leftWinDown = false
+			hook.leftWinMasked = false
 		}
 	case vkRWin:
 		if keyDown {
+			if !hook.rightWinDown {
+				hook.rightWinMasked = false
+			}
 			hook.rightWinDown = true
 		} else if keyUp {
 			hook.rightWinDown = false
+			hook.rightWinMasked = false
 		}
 	case vkR:
 		if keyDown && (hook.leftWinDown || hook.rightWinDown) {
 			if !hook.blockingR {
 				hook.blockingR = true
+				hook.maskActiveWindowsKeys()
 				select {
 				case hook.attempts <- struct{}{}:
 				default:
@@ -225,6 +242,41 @@ func (hook *Hook) processKey(vkCode, event uint32) bool {
 	}
 
 	return false
+}
+
+func (hook *Hook) maskActiveWindowsKeys() {
+	needsMask := hook.leftWinDown && !hook.leftWinMasked || hook.rightWinDown && !hook.rightWinMasked
+	if !needsMask {
+		return
+	}
+	if hook.maskWinPress != nil && !hook.maskWinPress() {
+		return
+	}
+	if hook.leftWinDown {
+		hook.leftWinMasked = true
+	}
+	if hook.rightWinDown {
+		hook.rightWinMasked = true
+	}
+}
+
+func sendWindowsKeyMask() bool {
+	inputs := [...]win.KEYBD_INPUT{
+		{
+			Type: win.INPUT_KEYBOARD,
+			Ki:   win.KEYBDINPUT{WVk: vkWinMask},
+		},
+		{
+			Type: win.INPUT_KEYBOARD,
+			Ki: win.KEYBDINPUT{
+				WVk:     vkWinMask,
+				DwFlags: win.KEYEVENTF_KEYUP,
+			},
+		},
+	}
+
+	inserted := win.SendInput(uint32(len(inputs)), unsafe.Pointer(&inputs[0]), int32(unsafe.Sizeof(inputs[0])))
+	return inserted == uint32(len(inputs))
 }
 
 func callNextHook(handle windows.Handle, code int32, wParam, lParam uintptr) uintptr {

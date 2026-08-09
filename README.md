@@ -19,7 +19,7 @@ Double-click `win-r-protector.exe`. On first launch it asks for UAC approval, in
 
 On later launches, the tray checks the service state and starts it with UAC approval when it is not running. Startup and service communication failures are appended to `%LOCALAPPDATA%\Win-R Protector\win-r-protector.log` and are also reported through the tray UI when possible.
 
-While the tray process is running, a native low-level keyboard hook suppresses Win+R and displays an application-owned warning: **Win-R attempt detected**. Other Windows-key shortcuts pass through unchanged.
+While the tray process is running, a native low-level keyboard hook suppresses Win+R, prevents that chord from being treated as a standalone Windows-key press, and displays an application-owned **Win-R attempt detected** dialog near the top-left of the primary desktop. Other Windows-key shortcuts pass through unchanged.
 
 Right-click the shield tray icon and open **Manage Service** to view status, start, stop, restart, uninstall the service, or exit the tray. Administrative actions request UAC approval only when selected. Uninstalling removes the service and the current user's logon registration but deliberately leaves the executable in place.
 
