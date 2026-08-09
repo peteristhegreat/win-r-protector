@@ -1,6 +1,6 @@
 # Win-R Protector
 
-Minimal Windows-only scaffolding for a background service and per-user tray application in one executable.
+A Windows-only background service and per-user tray application that intercepts Win+R.
 
 ## Build
 
@@ -16,6 +16,8 @@ The build embeds `icons\win-r-protect.ico` as both the executable and tray icon.
 ## Install and run
 
 Double-click `win-r-protector.exe`. On first launch it asks for UAC approval, installs and starts its automatic Windows service, registers the tray for the current user's next logon, and then remains running as an unelevated tray process.
+
+While the tray process is running, a native low-level keyboard hook suppresses Win+R and displays an application-owned warning: **Win-R attempt detected**. Other Windows-key shortcuts pass through unchanged.
 
 Right-click the shield tray icon and open **Manage Service** to view status, start, stop, restart, uninstall the service, or exit the tray. Administrative actions request UAC approval only when selected. Uninstalling removes the service and the current user's logon registration but deliberately leaves the executable in place.
 

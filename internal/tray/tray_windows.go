@@ -8,6 +8,7 @@ import (
 	"github.com/lxn/walk"
 	"github.com/phyatt/win-r-protector/internal/appmeta"
 	"github.com/phyatt/win-r-protector/internal/elevate"
+	"github.com/phyatt/win-r-protector/internal/keyboardhook"
 	"github.com/phyatt/win-r-protector/internal/servicecontrol"
 	"github.com/phyatt/win-r-protector/internal/startup"
 	"golang.org/x/sys/windows/svc"
@@ -61,6 +62,17 @@ func Run(initialWarning string) error {
 	if err := notifyIcon.SetVisible(true); err != nil {
 		return err
 	}
+
+	hook, err := keyboardhook.Start()
+	if err != nil {
+		initialWarning = appendWarning(initialWarning, fmt.Sprintf("Win+R protection could not start:\n\n%v", err))
+	} else {
+		defer hook.Close()
+		stopWatching := make(chan struct{})
+		defer close(stopWatching)
+		go showWinRAttempts(window, hook.Attempts(), stopWatching)
+	}
+
 	if initialWarning != "" {
 		walk.MsgBox(window, appmeta.Name, initialWarning, walk.MsgBoxOK|walk.MsgBoxIconWarning)
 	}
@@ -79,7 +91,7 @@ func (view *ui) buildMenu() error {
 		return err
 	}
 	about.Triggered().Attach(func() {
-		walk.MsgBox(view.window, appmeta.Name, "Windows service and tray scaffolding is running.", walk.MsgBoxOK|walk.MsgBoxIconInformation)
+		walk.MsgBox(view.window, appmeta.Name, "Win+R protection and Windows service management are running.", walk.MsgBoxOK|walk.MsgBoxIconInformation)
 	})
 
 	serviceMenu, err := walk.NewMenu()
@@ -123,6 +135,26 @@ func (view *ui) buildMenu() error {
 		return err
 	}
 	return root.Add(manage)
+}
+
+func showWinRAttempts(window *walk.MainWindow, attempts <-chan struct{}, stop <-chan struct{}) {
+	for {
+		select {
+		case <-attempts:
+			window.Synchronize(func() {
+				walk.MsgBox(window, appmeta.Name, "Win-R attempt detected", walk.MsgBoxOK|walk.MsgBoxIconWarning)
+			})
+		case <-stop:
+			return
+		}
+	}
+}
+
+func appendWarning(existing, warning string) string {
+	if existing == "" {
+		return warning
+	}
+	return existing + "\n\n" + warning
 }
 
 func action(text string, handler func()) *walk.Action {
