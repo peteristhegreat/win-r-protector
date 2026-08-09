@@ -6,7 +6,6 @@ import (
 	"fmt"
 
 	"github.com/lxn/walk"
-	"github.com/lxn/win"
 	"github.com/phyatt/win-r-protector/internal/appmeta"
 	"github.com/phyatt/win-r-protector/internal/elevate"
 	"github.com/phyatt/win-r-protector/internal/servicecontrol"
@@ -37,7 +36,7 @@ func Run(initialWarning string) error {
 	}
 	defer notifyIcon.Dispose()
 
-	trayIcon, err := walk.NewIconFromHICON(win.LoadIcon(0, win.MAKEINTRESOURCE(win.IDI_SHIELD)))
+	trayIcon, err := walk.NewIconFromResourceId(1)
 	if err != nil {
 		return err
 	}
