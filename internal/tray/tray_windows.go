@@ -6,6 +6,7 @@ import (
 	"fmt"
 
 	"github.com/lxn/walk"
+	"github.com/phyatt/win-r-protector/internal/applog"
 	"github.com/phyatt/win-r-protector/internal/appmeta"
 	"github.com/phyatt/win-r-protector/internal/elevate"
 	"github.com/phyatt/win-r-protector/internal/keyboardhook"
@@ -22,6 +23,8 @@ type ui struct {
 	stop      *walk.Action
 	restart   *walk.Action
 	uninstall *walk.Action
+
+	lastStatusError string
 }
 
 func Run(initialWarning string) error {
@@ -65,9 +68,14 @@ func Run(initialWarning string) error {
 
 	hook, err := keyboardhook.Start()
 	if err != nil {
+		applog.Errorf("start Win+R keyboard protection: %v", err)
 		initialWarning = appendWarning(initialWarning, fmt.Sprintf("Win+R protection could not start:\n\n%v", err))
 	} else {
-		defer hook.Close()
+		defer func() {
+			if err := hook.Close(); err != nil {
+				applog.Errorf("stop Win+R keyboard protection: %v", err)
+			}
+		}()
 		stopWatching := make(chan struct{})
 		defer close(stopWatching)
 		go showWinRAttempts(window, hook.Attempts(), stopWatching)
@@ -109,7 +117,7 @@ func (view *ui) buildMenu() error {
 	view.stop = action("Stop Service", func() { view.runElevated(elevate.Stop, "Service stopped.") })
 	view.restart = action("Restart Service", func() { view.runElevated(elevate.Restart, "Service restarted.") })
 	view.uninstall = action("Uninstall Service", view.uninstallService)
-	exit := action("Exit Tray", func() { view.window.Close() })
+	exit := action("Exit Tray", func() { walk.App().Exit(0) })
 
 	serviceActions := serviceMenu.Actions()
 	for _, item := range []*walk.Action{
@@ -167,6 +175,10 @@ func action(text string, handler func()) *walk.Action {
 func (view *ui) refresh() {
 	info, err := servicecontrol.Status()
 	if err != nil {
+		if message := err.Error(); message != view.lastStatusError {
+			applog.Errorf("query service status from tray: %v", err)
+			view.lastStatusError = message
+		}
 		view.status.SetText("Status: unavailable")
 		view.start.SetEnabled(false)
 		view.stop.SetEnabled(false)
@@ -174,6 +186,7 @@ func (view *ui) refresh() {
 		view.uninstall.SetEnabled(false)
 		return
 	}
+	view.lastStatusError = ""
 
 	view.status.SetText("Status: " + servicecontrol.StateText(info))
 	view.start.SetEnabled(info.Installed && info.State == svc.Stopped)
@@ -185,11 +198,13 @@ func (view *ui) refresh() {
 func (view *ui) runElevated(action elevate.Action, success string) bool {
 	exitCode, err := elevate.Run(action)
 	if err != nil {
+		applog.Errorf("run administrative action %q: %v", action, err)
 		walk.MsgBox(view.window, appmeta.Name, fmt.Sprintf("The administrative action failed:\n\n%v", err), walk.MsgBoxOK|walk.MsgBoxIconError)
 		view.refresh()
 		return false
 	}
 	if exitCode != 0 {
+		applog.Errorf("administrative action %q exited with code %d", action, exitCode)
 		walk.MsgBox(view.window, appmeta.Name, "The administrative action did not complete successfully.", walk.MsgBoxOK|walk.MsgBoxIconError)
 		view.refresh()
 		return false
@@ -204,6 +219,7 @@ func (view *ui) uninstallService() {
 		return
 	}
 	if err := startup.Unregister(); err != nil {
+		applog.Errorf("remove tray logon startup after service uninstall: %v", err)
 		walk.MsgBox(view.window, appmeta.Name, fmt.Sprintf("The service was removed, but logon startup could not be removed:\n\n%v", err), walk.MsgBoxOK|walk.MsgBoxIconWarning)
 	}
 }

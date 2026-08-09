@@ -7,27 +7,38 @@ import (
 	"os"
 	"strings"
 
+	"github.com/phyatt/win-r-protector/internal/applog"
 	"github.com/phyatt/win-r-protector/internal/elevate"
 	"github.com/phyatt/win-r-protector/internal/servicecontrol"
 	"github.com/phyatt/win-r-protector/internal/singleinstance"
 	"github.com/phyatt/win-r-protector/internal/startup"
 	"github.com/phyatt/win-r-protector/internal/tray"
+	"golang.org/x/sys/windows/svc"
 )
 
 const internalActionPrefix = "--internal-action="
 
 func main() {
+	_, logErr := applog.Start()
+	if logErr == nil {
+		defer applog.Close()
+	}
+
 	isService, err := servicecontrol.IsServiceProcess()
 	if err != nil {
+		applog.Errorf("detect process mode: %v", err)
 		return
 	}
 	if isService {
-		_ = servicecontrol.Run()
+		if err := servicecontrol.Run(); err != nil {
+			applog.Errorf("run Windows service: %v", err)
+		}
 		return
 	}
 
 	if action, ok := internalAction(); ok {
 		if err := performInternalAction(action); err != nil {
+			applog.Errorf("internal administrative action %q: %v", action, err)
 			os.Exit(1)
 		}
 		return
@@ -35,6 +46,7 @@ func main() {
 
 	lock, acquired, err := singleinstance.Acquire()
 	if err != nil {
+		applog.Errorf("acquire tray single-instance lock: %v", err)
 		tray.ShowError(err.Error())
 		return
 	}
@@ -43,8 +55,13 @@ func main() {
 	}
 	defer lock.Close()
 
-	warning := prepareInteractiveMode()
+	warning := ""
+	if logErr != nil {
+		warning = fmt.Sprintf("Diagnostic logging could not be started:\n\n%v", logErr)
+	}
+	warning = appendWarning(warning, prepareInteractiveMode())
 	if err := tray.Run(warning); err != nil {
+		applog.Errorf("run tray application: %v", err)
 		tray.ShowError(fmt.Sprintf("Unable to start the tray application:\n\n%v", err))
 	}
 }
@@ -77,19 +94,59 @@ func performInternalAction(action elevate.Action) error {
 func prepareInteractiveMode() string {
 	info, err := servicecontrol.Status()
 	if err != nil {
-		return fmt.Sprintf("Could not inspect the Windows service:\n\n%v", err)
+		return launchFailure("Could not inspect the Windows service", err)
 	}
 	if !info.Installed {
 		exitCode, err := elevate.Run(elevate.Install)
 		if err != nil {
-			return fmt.Sprintf("The Windows service could not be installed:\n\n%v", err)
+			return launchFailure("The Windows service could not be installed", err)
 		}
 		if exitCode != 0 {
-			return "The Windows service installation did not complete successfully."
+			return launchFailure("The Windows service installation did not complete successfully", fmt.Errorf("elevated helper exited with code %d", exitCode))
+		}
+	} else if info.State == svc.StartPending || info.State == svc.ContinuePending {
+		if err := servicecontrol.WaitForRunning(); err != nil {
+			return launchFailure("The Windows service did not finish starting", err)
+		}
+	} else if info.State != svc.Running {
+		exitCode, err := elevate.Run(elevate.Start)
+		if err != nil {
+			return launchFailure("The Windows service could not be started", err)
+		}
+		if exitCode != 0 {
+			return launchFailure("The Windows service did not start successfully", fmt.Errorf("elevated helper exited with code %d", exitCode))
 		}
 	}
+
+	info, err = servicecontrol.Status()
+	if err != nil {
+		return launchFailure("Could not verify the Windows service after startup", err)
+	}
+	if !info.Installed || info.State != svc.Running {
+		return launchFailure("The Windows service is not running", fmt.Errorf("current state is %s", servicecontrol.StateText(info)))
+	}
+
 	if err := startup.Register(); err != nil {
-		return fmt.Sprintf("The service is available, but tray startup at logon could not be registered:\n\n%v", err)
+		return launchFailure("The service is running, but tray startup at logon could not be registered", err)
 	}
 	return ""
+}
+
+func launchFailure(message string, err error) string {
+	applog.Errorf("%s: %v", message, err)
+	result := fmt.Sprintf("%s:\n\n%v", message, err)
+	if path := applog.Path(); path != "" {
+		result += "\n\nLog: " + path
+	}
+	return result
+}
+
+func appendWarning(existing, warning string) string {
+	if warning == "" {
+		return existing
+	}
+	if existing == "" {
+		return warning
+	}
+	return existing + "\n\n" + warning
 }

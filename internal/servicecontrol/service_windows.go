@@ -150,14 +150,54 @@ func Start() error {
 		if err != nil {
 			return err
 		}
-		if status.State == svc.Running {
+		switch status.State {
+		case svc.Running:
 			return nil
+		case svc.StartPending, svc.ContinuePending:
+			return waitForState(service, svc.Running)
+		case svc.StopPending:
+			if err := waitForState(service, svc.Stopped); err != nil {
+				return err
+			}
+		case svc.PausePending:
+			if err := waitForState(service, svc.Paused); err != nil {
+				return err
+			}
+			fallthrough
+		case svc.Paused:
+			if _, err := service.Control(svc.Continue); err != nil {
+				return err
+			}
+			return waitForState(service, svc.Running)
 		}
 		if err := service.Start(); err != nil && !errors.Is(err, windows.ERROR_SERVICE_ALREADY_RUNNING) {
 			return err
 		}
 		return waitForState(service, svc.Running)
 	})
+}
+
+// WaitForRunning waits using query-only SCM access, so an already-starting
+// service does not cause an unnecessary UAC prompt.
+func WaitForRunning() error {
+	deadline := time.Now().Add(stateChangeTimeout)
+	for time.Now().Before(deadline) {
+		info, err := Status()
+		if err != nil {
+			return err
+		}
+		if !info.Installed {
+			return fmt.Errorf("service is not installed")
+		}
+		if info.State == svc.Running {
+			return nil
+		}
+		if info.State != svc.StartPending && info.State != svc.ContinuePending {
+			return fmt.Errorf("service entered state %s", StateText(info))
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
+	return fmt.Errorf("timed out waiting for service to run")
 }
 
 func Stop() error {
